@@ -1,0 +1,45 @@
+{
+  "piyasa": [
+    {"grup": "Döviz", "sembol": "USDTRY=X", "ad": "Dolar/TL", "ondalik": 4, "esik": 1.0},
+    {"grup": "Döviz", "sembol": "EURTRY=X", "ad": "Euro/TL", "ondalik": 4, "esik": 1.0},
+    {"grup": "Döviz", "sembol": "EURUSD=X", "ad": "Euro/Dolar", "ondalik": 4, "esik": 1.0},
+    {"grup": "Döviz", "sembol": "GBPTRY=X", "ad": "Sterlin/TL", "ondalik": 4, "esik": 1.5},
+    {"grup": "Altın ve Emtia", "sembol": "GRAMALTIN", "ad": "Gram Altın (TL)", "ondalik": 0, "esik": 1.5},
+    {"grup": "Altın ve Emtia", "sembol": "GC=F", "ad": "Ons Altın ($)", "ondalik": 0, "esik": 1.5},
+    {"grup": "Altın ve Emtia", "sembol": "GRAMGUMUS", "ad": "Gram Gümüş (TL)", "ondalik": 2, "esik": 3.0},
+    {"grup": "Altın ve Emtia", "sembol": "BZ=F", "ad": "Brent Petrol ($)", "ondalik": 2, "esik": 3.0},
+    {"grup": "Kripto", "sembol": "BTC-USD", "ad": "Bitcoin ($)", "ondalik": 0, "esik": 4.0},
+    {"grup": "Kripto", "sembol": "ETH-USD", "ad": "Ethereum ($)", "ondalik": 0, "esik": 5.0},
+    {"grup": "Kripto", "sembol": "BTCTRY", "ad": "Bitcoin (TL)", "ondalik": 0, "esik": 4.0},
+    {"grup": "Endeks", "sembol": "XU100.IS", "ad": "BIST 100", "ondalik": 0, "esik": 2.0},
+    {"grup": "Endeks", "sembol": "XU030.IS", "ad": "BIST 30", "ondalik": 0, "esik": 2.0},
+    {"grup": "Endeks", "sembol": "XU100USD", "ad": "BIST 100 ($)", "ondalik": 0, "esik": 2.5},
+    {"grup": "Endeks", "sembol": "^GSPC", "ad": "S&P 500", "ondalik": 0, "esik": 1.5}
+  ],
+  "bist30_donem": "Ekim-Aralık 2026",
+  "bist30": [
+    "AEFES", "AKBNK", "ASELS", "ASTOR", "BIMAS", "EKGYO", "ENKAI", "EREGL", "FROTO", "GARAN",
+    "GUBRF", "ISCTR", "KCHOL", "KRDMD", "MGROS", "PETKM", "PGSUS", "SAHOL", "SASA", "SISE",
+    "TAVHL", "TCELL", "THYAO", "TOASO", "TRALT", "TRMET", "TTKOM", "TUPRS", "VAKBN", "YKBNK"
+  ],
+  "bist_genis": [
+    "AGHOL", "AKCNS", "AKFGY", "AKSA", "AKSEN", "ALARK", "ALFAS", "ALTNY", "ANSGR", "ARCLK",
+    "ARDYZ", "BERA", "BFREN", "BIOEN", "BOBET", "BRSAN", "BRYAT", "BTCIM", "CANTE", "CCOLA",
+    "CIMSA", "CWENE", "DOAS", "DOHOL", "ECILC", "ECZYT", "EGEEN", "ENERY", "ENJSA", "EUPWR",
+    "EUREN", "GESAN", "GOLTS", "HALKB", "HEKTS", "ISGYO", "ISMEN", "IZENR", "KAYSE", "KCAER",
+    "KLSER", "KONKA", "KONTR", "KONYA", "KZBGY", "LMKDC", "MAVI", "MIATK", "ODAS", "OTKAR",
+    "OYAKC", "PEKGY", "QUAGR", "REEDR", "RGYAS", "SDTTR", "SKBNK", "SMRTG", "SOKM", "TABGD",
+    "TKFEN", "TMSN", "TRGYO", "TSKB", "TTRAK", "TUKAS", "TURSG", "ULKER", "VESBE", "VESTL",
+    "YEOTK", "YYLGD", "ZOREN"
+  ],
+  "alarm": {
+    "hisse_gunluk_esik": 4.0,
+    "hacim_carpani": 2.0,
+    "en_az_onem": 2
+  },
+  "fiyat_alarmlari": [],
+  "haber_kaynaklari": [
+    {"ad": "Bloomberg HT", "url": "https://www.bloomberght.com/rss"},
+    {"ad": "AA Ekonomi", "url": "https://www.aa.com.tr/tr/rss/default?cat=ekonomi"}
+  ]
+}

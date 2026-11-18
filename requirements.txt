@@ -1,7 +1,9 @@
-yfinance
+streamlit>=1.50
+yfinance>=0.2.54
 pandas
 numpy
 plotly
 feedparser
-streamlit
+requests
 openpyxl
+xlrd

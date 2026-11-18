@@ -1,454 +1,509 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
+"""Borsa Terminali v2 — BIST 30, döviz, altın, kripto için sade ortak takip ekranı."""
+import hmac
+import html
+import io
+from datetime import datetime
+
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
 from plotly.subplots import make_subplots
-import feedparser
-import requests
-import re
-from urllib.parse import quote
-import warnings
 
-warnings.filterwarnings('ignore')
+import alarm_bot
+import core
+from core import tr, yuzde
 
-st.set_page_config(page_title="Kişisel Borsa Terminali", layout="wide")
+st.set_page_config(page_title="Borsa Terminali", page_icon="📈", layout="wide")
+CFG = core.config_yukle()
+BIST30, GENIS = CFG["bist30"], CFG["bist_genis"]
+TL_BAZLI = ("GRAMALTIN", "GRAMGUMUS", "BTCTRY")
 
-WATCHLIST = [
-    {"symbol": "XU100.IS", "name": "BIST 100", "query": "BIST 100 borsa"},
-    {"symbol": "USDTRY=X", "name": "Dolar/TL", "query": "Dolar TL kuru"},
-    {"symbol": "GC=F", "name": "Ons Altın", "query": "Altın fiyatları"},
-    {"symbol": "THYAO.IS", "name": "Türk Hava Yolları", "query": "THY Türk Hava Yolları hisse"},
-    {"symbol": "ASELS.IS", "name": "Aselsan", "query": "Aselsan hisse"},
-    {"symbol": "GARAN.IS", "name": "Garanti BBVA", "query": "Garanti BBVA hisse"},
-    {"symbol": "AKBNK.IS", "name": "Akbank", "query": "Akbank hisse"},
-    {"symbol": "EREGL.IS", "name": "Ereğli Demir Çelik", "query": "Ereğli Demir Çelik hisse"},
-    {"symbol": "KCHOL.IS", "name": "Koç Holding", "query": "Koç Holding hisse"},
-    {"symbol": "TUPRS.IS", "name": "Tüpraş", "query": "Tüpraş hisse"},
-]
 
-BIST_30 = [
-    "AKBNK.IS", "ALARK.IS", "ARCLK.IS", "ASELS.IS", "ASTOR.IS", "BIMAS.IS",
-    "BRSAN.IS", "DOAS.IS", "EKGYO.IS", "ENKAI.IS", "EREGL.IS", "FROTO.IS",
-    "GARAN.IS", "GUBRF.IS", "HEKTS.IS", "ISCTR.IS", "KCHOL.IS", "KONTR.IS",
-    "KRDMD.IS", "ODAS.IS", "OYAKC.IS", "PETKM.IS", "PGSUS.IS", "SAHOL.IS",
-    "SASA.IS", "SISE.IS", "TCELL.IS", "THYAO.IS", "TOASO.IS", "TUPRS.IS", "YKBNK.IS"
-]
-
-BIST_100 = sorted(list(set(BIST_30 + [
-    "AEFES.IS", "AGHOL.IS", "AKCNS.IS", "AKFGY.IS", "AKSA.IS", "AKSEN.IS", "ALFAS.IS",
-    "ALTNY.IS", "ANSGR.IS", "ARDYZ.IS", "BERA.IS", "BFREN.IS", "BIOEN.IS", "BOBET.IS",
-    "BRYAT.IS", "BTCIM.IS", "CANTE.IS", "CCOLA.IS", "CIMSA.IS", "CWENE.IS", "DOHOL.IS",
-    "ECILC.IS", "ECZYT.IS", "EGEEN.IS", "ENERY.IS", "ENJSA.IS", "EUPWR.IS", "EUREN.IS",
-    "GESAN.IS", "GOLTS.IS", "HALKB.IS", "ISGYO.IS", "ISMEN.IS", "IZENR.IS", "KAYSE.IS",
-    "KCAER.IS", "KLSER.IS", "KONKA.IS", "KONYA.IS", "KOZAA.IS", "KZBGY.IS", "LMKDC.IS",
-    "MAVI.IS", "MGROS.IS", "MIATK.IS", "ODAS.IS", "OTKAR.IS", "OYAKC.IS", "PEKGY.IS",
-    "QUAGR.IS", "REEDR.IS", "RGYAS.IS", "SDTTR.IS", "SKBNK.IS", "SMRTG.IS", "SOKM.IS",
-    "TABGD.IS", "TAVHL.IS", "TKFEN.IS", "TMSN.IS", "TRGYO.IS", "TSKB.IS", "TTKOM.IS",
-    "TTRAK.IS", "TUKAS.IS", "TURSG.IS", "ULKER.IS", "VAKBN.IS", "VESBE.IS", "VESTL.IS",
-    "YEOTK.IS", "YYLGD.IS", "ZOREN.IS"
-])))
-
-def _rma(values: np.ndarray, period: int) -> np.ndarray:
-    out = np.full(len(values), np.nan)
-    if len(values) <= period:
-        return out
-    out[period] = values[1 : period + 1].mean()
-    for i in range(period + 1, len(values)):
-        out[i] = (out[i - 1] * (period - 1) + values[i]) / period
-    return out
-
-def rsi_wilder(close: pd.Series, period: int = 14) -> pd.Series:
-    delta = close.diff().to_numpy(dtype=float)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain, avg_loss = _rma(gain, period), _rma(loss, period)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rs = avg_gain / avg_loss
-        rsi = np.where(avg_loss == 0, 100.0, 100 - 100 / (1 + rs))
-    rsi[np.isnan(avg_gain)] = np.nan
-    return pd.Series(rsi, index=close.index)
-
-def supertrend_hesapla(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0):
-    hl2 = (df['High'] + df['Low']) / 2
-    atr = df['ATR_14']
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
-    supertrend = [True] * len(df)
-    st_val = [np.nan] * len(df)
-
-    for i in range(1, len(df)):
-        curr_close = df['Close'].iloc[i]
-        prev_upper = upperband.iloc[i - 1]
-        prev_lower = lowerband.iloc[i - 1]
-
-        if curr_close > prev_upper:
-            supertrend[i] = True
-        elif curr_close < prev_lower:
-            supertrend[i] = False
-        else:
-            supertrend[i] = supertrend[i - 1]
-            if supertrend[i] and lowerband.iloc[i] < prev_lower:
-                lowerband.iloc[i] = prev_lower
-            if not supertrend[i] and upperband.iloc[i] > prev_upper:
-                upperband.iloc[i] = prev_upper
-
-        st_val[i] = lowerband.iloc[i] if supertrend[i] else upperband.iloc[i]
-
-    df['Supertrend'] = st_val
-    df['ST_Dir'] = supertrend
-    return df
-
-def teknik_hesapla(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df['EMA_5'] = df['Close'].ewm(span=5, adjust=False).mean()
-    df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
-    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200).mean()
-    df['SMA_600'] = df['Close'].rolling(window=600).mean()
-
-    df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    df['STD_20'] = df['Close'].rolling(window=20).std()
-    df['BB_Upper'] = df['SMA_20'] + (df['STD_20'] * 2)
-    df['BB_Lower'] = df['SMA_20'] - (df['STD_20'] * 2)
-
-    df['RSI_14'] = rsi_wilder(df['Close'], 14)
-
-    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = ema12 - ema26
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
-
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR_14'] = tr.rolling(window=14).mean()
-
-    df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
-    df['Vol_Ratio'] = df['Volume'] / df['Vol_SMA_20']
-
-    df = supertrend_hesapla(df)
-    return df
-
-@st.cache_data(ttl=60)
-def veri_cek(symbol: str, period: str, interval: str) -> pd.DataFrame:
-    df = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
-    if not df.empty:
-        df = df.dropna(subset=["Close"])
-    return df
-
-@st.cache_data(ttl=60)
-def izleme_listesi_ozet():
-    rows = []
-    for w in WATCHLIST:
+def metin_coz(b: bytes) -> str:
+    for e in ("utf-8-sig", "cp1254"):
         try:
-            h = yf.Ticker(w["symbol"]).history(period="5d", interval="1d")["Close"].dropna()
-            if len(h) >= 2:
-                last, prev = float(h.iloc[-1]), float(h.iloc[-2])
-                chg = (last - prev) / prev * 100
-                rows.append({"Sembol": w["symbol"].replace(".IS", "").replace("=X", ""), "Ad": w["name"], "Fiyat": round(last, 2), "Değişim %": round(chg, 2)})
-        except Exception:
+            return b.decode(e)
+        except UnicodeDecodeError:
             pass
-    return pd.DataFrame(rows)
+    return b.decode("latin-1")
 
-@st.cache_data(ttl=300)
-def haber_cek(url: str):
+
+def gizli(anahtar, varsayilan=None):
     try:
-        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0 bist-panel"})
-        r.raise_for_status()
-        feed = feedparser.parse(r.content)
-        return [{"title": e.get("title", "").strip(), "link": e.get("link", "")} for e in feed.entries[:8]]
+        return st.secrets[anahtar]
     except Exception:
-        return []
+        return varsayilan
 
-# Üst Başlık ve Mobil / Masaüstü Görünüm Seçici
-h_col1, h_col2 = st.columns([2, 1])
-with h_col1:
-    st.title("📈 Borsa Terminali")
-with h_col2:
-    gorunum = st.radio("Ekran Modu", ["📱 Mobil", "💻 Masaüstü"], horizontal=True, index=0)
 
-mobil_mi = ("Mobil" in gorunum)
-sutun_sayisi = 2 if mobil_mi else 5
+# ---------------------------------------------------------------- isteğe bağlı şifre
+SIFRE = gizli("APP_PASSWORD")
+if SIFRE and not st.session_state.get("giris"):
+    st.title("🔒 Borsa Terminali")
+    girilen = st.text_input("Şifre", type="password")
+    if girilen:
+        if hmac.compare_digest(str(girilen), str(SIFRE)):
+            st.session_state["giris"] = True
+            st.rerun()
+        st.error("Şifre yanlış.")
+    st.stop()
 
-with st.expander("⭐ Ortak İzleme Listesi (Anlık Özet)", expanded=True):
-    df_watch = izleme_listesi_ozet()
-    if not df_watch.empty:
-        cols = st.columns(sutun_sayisi)
-        for i, row in df_watch.iterrows():
-            cols[i % sutun_sayisi].metric(f"{row['Sembol']}", f"{row['Fiyat']:.2f}", f"{row['Değişim %']:+.2f}%")
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🔍 Grafik",
-    "🚀 Tarayıcı",
-    "🏦 AKD Analiz",
-    "📰 Haberler"
-])
+# ---------------------------------------------------------------- veri (önbellekli)
+@st.cache_data(ttl=120, show_spinner=False)
+def veri(semboller: tuple, period: str, interval: str) -> dict:
+    return core.toplu_indir(list(semboller), period, interval)
 
-with tab1:
-    if mobil_mi:
-        secili = st.selectbox("BIST 100 Hissesi Seçin", BIST_100, index=BIST_100.index("THYAO.IS"))
-        manuel = st.text_input("Veya Manuel Sembol (Örn: XU100.IS, AAPL, GC=F)", "")
-        g_col1, g_col2 = st.columns(2)
-        with g_col1:
-            zaman_secimi = st.selectbox("Zaman Dilimi", ["1 Yıl · Günlük", "3 Ay · Günlük", "1 Ay · Saatlik", "5 Yıl · Haftalık"], index=0)
-        with g_col2:
-            birim = st.radio("Para Birimi", ["TL (₺)", "USD ($)"], horizontal=True)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def bist_tarama(kodlar: tuple) -> pd.DataFrame:
+    v = core.toplu_indir([k + ".IS" for k in kodlar], "3y", "1d")
+    return core.tarama(v, hacim_carpani=CFG["alarm"]["hacim_carpani"])
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def piyasa_verisi() -> list:
+    v = core.toplu_indir([k["sembol"] for k in CFG["piyasa"]], "1y", "1d")
+    return [core.piyasa_satiri(k, v.get(k["sembol"])) for k in CFG["piyasa"]]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def haber(url: str, kaynak: str = "") -> list:
+    return core.haber_cek(url, kaynak)
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def temel(kod: str):
+    import yfinance as yf
+
+    try:
+        i = yf.Ticker(kod + ".IS").info or {}
+    except Exception:
+        return None
+    if i.get("priceToBook") is None and i.get("trailingPE") is None:
+        return None
+
+    def y(x):
+        return round(x * 100, 1) if isinstance(x, (int, float)) else None
+
+    return {"Hisse": kod, "PD/DD": i.get("priceToBook"), "F/K": i.get("trailingPE"),
+            "ROE %": y(i.get("returnOnEquity")), "Net Kâr Büyüme %": y(i.get("earningsQuarterlyGrowth")),
+            "Sektör": i.get("sector", "")}
+
+
+# ---------------------------------------------------------------- başlık
+b1, b2 = st.columns([3, 2])
+b1.markdown("## 📈 Borsa Terminali")
+mobil = b2.toggle("📱 Telefon görünümü", value=st.query_params.get("g", "m") == "m")
+st.query_params["g"] = "m" if mobil else "d"
+
+
+st.markdown("""<style>
+.kg{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:8px;margin:4px 0 14px}
+.kk{border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:8px 10px;min-width:0}
+.kk .b{font-size:.78rem;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kk .d{font-size:1.2rem;font-weight:600;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kk .p{font-size:.85rem;font-weight:600}.kk .art{color:#16a34a}.kk .azl{color:#dc2626}.kk .not{opacity:.65;font-weight:400}
+</style>""", unsafe_allow_html=True)
+
+
+def izgara(ogeler):
+    """ogeler: [(başlık, değer, değişim)] -> telefonda da yan yana duran kart ızgarası"""
+    h = []
+    for bas, deg, dlt in ogeler:
+        d = str(dlt or "")
+        sinif = "art" if d[:1] in "+▲" and d else "azl" if d[:1] in "-▼" and d else "not"
+        ok = "▲ " if d[:1] == "+" else "▼ " if d[:1] == "-" else ""
+        h.append(f'<div class="kk"><div class="b">{html.escape(str(bas))}</div><div class="d">{html.escape(str(deg))}</div>'
+                 + (f'<div class="p {sinif}">{ok}{html.escape(d.lstrip("+-"))}</div>' if d else "") + "</div>")
+    st.markdown('<div class="kg">' + "".join(h) + "</div>", unsafe_allow_html=True)
+
+
+def tablo(df, **kw):
+    gizle = [c for c in df.columns if c.startswith("_")]
+    st.dataframe(df.drop(columns=gizle), width="stretch", hide_index=True, column_config={
+        "Fiyat": st.column_config.NumberColumn(format="%.2f"),
+        "Gün %": st.column_config.NumberColumn(format="%+.2f"),
+        "Hacim x": st.column_config.NumberColumn(format="%.2f"),
+        "RSI": st.column_config.NumberColumn(format="%.0f"),
+        "Zirveye %": st.column_config.NumberColumn(format="%.1f"),
+    }, **kw)
+
+
+sek = st.tabs(["🏠 Özet", "📈 Grafik", "🚀 Tarayıcı", "⚖️ Karşılaştır", "💎 Temel", "🏦 AKD", "📰 Haber", "🔔 Alarm"])
+
+# ================================================================ ÖZET
+with sek[0]:
+    with st.spinner("Piyasa verileri alınıyor…"):
+        piyasa = piyasa_verisi()
+        b30 = bist_tarama(tuple(BIST30))
+    dolu = [r for r in piyasa if r]
+    if not dolu:
+        st.error("Piyasa verisi alınamadı (Yahoo Finance yanıt vermedi). Birkaç dakika sonra sayfayı yenileyin.")
     else:
-        c1, c2, c3, c4 = st.columns([1.1, 1.3, 1.1, 0.9])
-        with c1:
-            secili = st.selectbox("BIST 100 Hissesi Seçin", BIST_100, index=BIST_100.index("THYAO.IS"))
-        with c2:
-            manuel = st.text_input("Veya Manuel Sembol (Örn: XU100.IS, AAPL, GC=F)", "")
-        with c3:
-            zaman_secimi = st.selectbox("Zaman Dilimi", ["1 Yıl · Günlük", "3 Ay · Günlük", "1 Ay · Saatlik", "5 Yıl · Haftalık"], index=0)
-        with c4:
-            birim = st.radio("Para Birimi", ["TL (₺)", "USD ($)"], horizontal=True)
+        for c in core.gun_ozeti(piyasa, b30 if len(b30) else None):
+            st.markdown(f"- {c}")
+        donem = st.radio("Değişim dönemi", ["Gün", "Hafta", "Ay", "Yılbaşından"], horizontal=True,
+                         label_visibility="collapsed")
+        alan = {"Gün": "gun", "Hafta": "hafta", "Ay": "ay", "Yılbaşından": "yb"}[donem]
+        for grup in dict.fromkeys(r["grup"] for r in dolu):
+            st.caption(grup.upper())
+            izgara([(r["ad"], tr(r["son"], r["ondalik"]), yuzde(r[alan])) for r in dolu if r["grup"] == grup])
+        st.caption("Veri: Yahoo Finance · BIST yaklaşık 15 dk gecikmeli · Gram altın = ons × dolar ÷ 31,10 "
+                   "(Kapalıçarşı fiyatından bir miktar farklı olabilir).")
 
-    periyot_map = {
-        "1 Yıl · Günlük": ("3y", "1d", 140 if mobil_mi else 250),
-        "3 Ay · Günlük": ("1y", "1d", 70 if mobil_mi else 90),
-        "1 Ay · Saatlik": ("1mo", "1h", 120 if mobil_mi else 200),
-        "5 Yıl · Haftalık": ("5y", "1wk", 150 if mobil_mi else 260),
-    }
-    p_val, i_val, bar_sayisi = periyot_map[zaman_secimi]
-
-    sembol = manuel.strip().upper() if manuel.strip() != "" else secili
-    if not sembol.endswith(".IS") and "-" not in sembol and "=" not in sembol and len(sembol) <= 5 and sembol not in ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META"]:
-        sembol += ".IS"
-
-    df = veri_cek(sembol, p_val, i_val)
-
-    if not df.empty and birim == "USD ($)" and sembol.endswith(".IS"):
-        usd_df = veri_cek("USDTRY=X", p_val, i_val)
-        if not usd_df.empty:
-            usd_close = usd_df['Close'].reindex(df.index, method='ffill').bfill()
-            for col in ['Open', 'High', 'Low', 'Close']:
-                df[col] = df[col] / usd_close
-
-    if df.empty:
-        st.error(f"{sembol} için veri alınamadı.")
-    else:
-        df = teknik_hesapla(df)
-        son = df.iloc[-1]
-        onceki = df.iloc[-2] if len(df) > 1 else son
-        df_plot = df.tail(bar_sayisi)
-
-        degisim_pct = ((float(son['Close']) - float(onceki['Close'])) / float(onceki['Close']) * 100) if float(onceki['Close']) else 0
-        st_durum = "🟢 AL" if son['ST_Dir'] else "🔴 SAT"
-
-        # Metrik Kartları (Mobilde 2'li geniş kartlar, Masaüstünde 5'li)
-        metrikler = [
-            (f"Fiyat ({birim.split()[0]})", f"{float(son['Close']):.2f}", f"{degisim_pct:+.2f}%"),
-            ("Wilder RSI (14)", f"{float(son['RSI_14']):.1f}" if pd.notna(son['RSI_14']) else "-", None),
-            ("Supertrend", st_durum, None),
-            ("Hacim Çarpanı", f"{float(son['Vol_Ratio']):.2f}x" if pd.notna(son['Vol_Ratio']) else "-", None),
-            ("EMA 50 / SMA 200", f"{float(son['EMA_50']):.1f} / {float(son['SMA_200']):.1f}" if pd.notna(son['SMA_200']) else f"{float(son['EMA_50']):.2f}", None),
-        ]
-        m_cols = st.columns(sutun_sayisi)
-        for idx_m, (baslik, deger, delta) in enumerate(metrikler):
-            m_cols[idx_m % sutun_sayisi].metric(baslik, deger, delta)
-
-        direnc = float(df_plot['High'].tail(60).max())
-        destek = float(df_plot['Low'].tail(60).min())
-        atr = float(son['ATR_14']) if pd.notna(son['ATR_14']) else 0.0
-        fiyat = float(son['Close'])
-
-        st.info(f"**Destek:** {destek:.2f} | **Direnç:** {direnc:.2f} | **Stop (2x ATR):** {fiyat - 2*atr:.2f} | **Hedef (3x ATR):** {fiyat + 3*atr:.2f}")
-
-        # İndikatör Seçici (Mobilde ekranı sade tutmak için)
-        varsayilan_katman = ["EMA 21", "Supertrend", "Destek/Direnç"] if mobil_mi else ["EMA 5", "EMA 21", "EMA 50", "SMA 200", "Supertrend", "Destek/Direnç"]
-        katmanlar = st.multiselect(
-            "Grafik Katmanları (İstediğinizi ekleyip çıkarın)",
-            ["EMA 5", "EMA 21", "EMA 50", "SMA 200", "SMA 600", "Supertrend", "Bollinger", "Destek/Direnç"],
-            default=varsayilan_katman
-        )
-
-        alt_panel = st.radio("Alt Gösterge Paneli", ["RSI + MACD", "Sadece RSI", "Sadece MACD"], horizontal=True, index=1 if mobil_mi else 0)
-
-        if alt_panel == "RSI + MACD":
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.58, 0.21, 0.21])
+    if len(b30):
+        st.divider()
+        st.markdown("#### BIST 30'da bugün")
+        yeni = [(r["Hisse"], s) for _, r in b30.iterrows() for s in r["_sinyaller"] if s["onem"] >= 2]
+        if yeni:
+            for h, s in yeni[:12]:
+                isaret = "🟢" if s["yon"] > 0 else "🔴" if s["yon"] < 0 else "🔊"
+                st.markdown(f"{isaret} **{h}** — {s['metin']}")
         else:
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.72, 0.28])
+            st.caption("Bugün önemli yeni bir teknik sinyal yok.")
+        sirali = b30.sort_values("Gün %", ascending=False)[["Hisse", "Fiyat", "Gün %", "Durum"]]
+        k1, k2 = st.columns(2)
+        k1.caption("EN ÇOK YÜKSELEN")
+        with k1:
+            tablo(sirali.head(5))
+        k2.caption("EN ÇOK DÜŞEN")
+        with k2:
+            tablo(sirali.tail(5).iloc[::-1])
+    elif dolu:
+        st.warning("BIST 30 hisse verisi şu an alınamadı.")
 
-        fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='Fiyat'), row=1, col=1)
+    # ---- isteğe bağlı portföy (yalnızca şifre korumasında)
+    portfoy = gizli("portfoy")
+    if portfoy and SIFRE:
+        st.divider()
+        st.markdown("#### 💼 Portföyüm")
+        semboller = {k: core.sembol_adaylari(k, BIST30 + GENIS)[0] for k in portfoy}
+        pv = veri(tuple(sorted(set(semboller.values()) | {"USDTRY=X"})), "5d", "1d")
+        kur = float(pv["USDTRY=X"]["Close"].iloc[-1]) if len(pv["USDTRY=X"]) else np.nan
+        satir = []
+        for k, (adet, maliyet) in portfoy.items():
+            d = pv.get(semboller[k])
+            if d is None or len(d) < 2:
+                continue
+            s = semboller[k]
+            tl = s.endswith(".IS") or s in TL_BAZLI or s.endswith("TRY=X")
+            son = float(d["Close"].iloc[-1])
+            carpan = 1 if tl else kur
+            satir.append({"Varlık": k, "Adet": adet, "Maliyet": maliyet, "Fiyat": son,
+                          "Gün %": core.getiri(d["Close"], 1), "K/Z %": (son / maliyet - 1) * 100,
+                          "Değer (TL)": adet * son * carpan, "_mal": adet * maliyet * carpan})
+        if satir:
+            pdf = pd.DataFrame(satir)
+            toplam, mal = pdf["Değer (TL)"].sum(), pdf["_mal"].sum()
+            izgara([("Toplam değer", tr(toplam, 0) + " ₺", yuzde((toplam / mal - 1) * 100)),
+                    ("Dolar karşılığı", tr(toplam / kur, 0) + " $", None)])
+            st.dataframe(pdf.drop(columns="_mal").round(2), width="stretch", hide_index=True)
+            st.caption("Maliyet kendi para biriminde; TL değeri güncel kurla çevrilir.")
 
-        if "EMA 5" in katmanlar:
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_5'], name='EMA 5', line=dict(color='cyan', width=1.1)), row=1, col=1)
-        if "EMA 21" in katmanlar:
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_21'], name='EMA 21', line=dict(color='orange', width=1.5)), row=1, col=1)
-        if "EMA 50" in katmanlar:
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_50'], name='EMA 50', line=dict(color='#38bdf8', width=1.6)), row=1, col=1)
-        if "SMA 200" in katmanlar and df_plot['SMA_200'].notna().any():
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['SMA_200'], name='SMA 200', line=dict(color='magenta', width=2)), row=1, col=1)
-        if "SMA 600" in katmanlar and df_plot['SMA_600'].notna().any():
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['SMA_600'], name='SMA 600', line=dict(color='yellow', width=2, dash='dash')), row=1, col=1)
-        if "Supertrend" in katmanlar:
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['Supertrend'], name='Supertrend', line=dict(color='#22c55e', width=1.8, dash='dot')), row=1, col=1)
-        if "Bollinger" in katmanlar:
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['BB_Upper'], name='BB Üst', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['BB_Lower'], name='BB Alt', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
-        if "Destek/Direnç" in katmanlar:
+# ================================================================ GRAFİK
+ZAMAN = {"Günlük · 1 yıl": ("3y", "1d", 250), "Günlük · 3 ay": ("3y", "1d", 66),
+         "Saatlik · 1 ay": ("3mo", "1h", 170), "Haftalık · 5 yıl": ("10y", "1wk", 260)}
+ETIKET = {k: k + ".IS" for k in BIST30}
+ETIKET.update({k["ad"]: k["sembol"] for k in CFG["piyasa"]})
+ETIKET.update({k: k + ".IS" for k in GENIS})
+
+
+def grafik_ciz(g, katman, alt, destek, direnc, saatlik):
+    satir = 1 + ("RSI" in alt) + ("MACD" in alt) + ("Hacim" in alt)
+    yuk = [0.6] + [0.4 / (satir - 1)] * (satir - 1) if satir > 1 else [1]
+    fig = make_subplots(rows=satir, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=yuk)
+    x = g.index.strftime("%d.%m %H:%M" if saatlik else "%d.%m.%y")
+    fig.add_trace(go.Candlestick(x=x, open=g["Open"], high=g["High"], low=g["Low"], close=g["Close"], name="Fiyat",
+                                 increasing_line_color="#26a69a", decreasing_line_color="#ef5350"), row=1, col=1)
+    cizgi = {"EMA 5": ("EMA_5", "#22d3ee"), "EMA 21": ("EMA_21", "#f59e0b"), "EMA 50": ("EMA_50", "#38bdf8"),
+             "SMA 200": ("SMA_200", "#e879f9"), "SMA 600": ("SMA_600", "#facc15")}
+    for ad, (kol, renk) in cizgi.items():
+        if ad in katman and g[kol].notna().any():
+            fig.add_trace(go.Scatter(x=x, y=g[kol], name=ad, line=dict(color=renk, width=1.4)), row=1, col=1)
+    if "Supertrend" in katman:
+        for yon, renk, ad in [(1, "#22c55e", "ST (AL)"), (-1, "#ef4444", "ST (SAT)")]:
+            fig.add_trace(go.Scatter(x=x, y=g["ST"].where(g["ST_Yon"] == yon), name=ad,
+                                     line=dict(color=renk, width=1.8)), row=1, col=1)
+    if "Bollinger" in katman:
+        for kol in ("BB_Ust", "BB_Alt"):
+            fig.add_trace(go.Scatter(x=x, y=g[kol], name=kol.replace("_", " "), showlegend=False,
+                                     line=dict(color="gray", width=1, dash="dash")), row=1, col=1)
+    if "Destek/Direnç" in katman:
+        if direnc:
             fig.add_hline(y=direnc, line_dash="dash", line_color="#ef4444", row=1, col=1)
+        if destek:
             fig.add_hline(y=destek, line_dash="dash", line_color="#22c55e", row=1, col=1)
+    r = 2
+    if "RSI" in alt:
+        fig.add_trace(go.Scatter(x=x, y=g["RSI"], name="RSI", line=dict(color="#c084fc", width=1.5)), row=r, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="#ef4444", row=r, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="#22c55e", row=r, col=1)
+        r += 1
+    if "MACD" in alt:
+        renk = ["#26a69a" if v >= 0 else "#ef5350" for v in g["MACD_Hist"].fillna(0)]
+        fig.add_trace(go.Bar(x=x, y=g["MACD_Hist"], name="MACD Hist", marker_color=renk), row=r, col=1)
+        fig.add_trace(go.Scatter(x=x, y=g["MACD"], name="MACD", line=dict(color="#38bdf8", width=1.2)), row=r, col=1)
+        fig.add_trace(go.Scatter(x=x, y=g["MACD_Sinyal"], name="Sinyal", line=dict(color="#f59e0b", width=1.2)), row=r, col=1)
+        r += 1
+    if "Hacim" in alt and "Volume" in g:
+        renk = ["#26a69a" if c >= o else "#ef5350" for c, o in zip(g["Close"], g["Open"])]
+        fig.add_trace(go.Bar(x=x, y=g["Volume"], name="Hacim", marker_color=renk), row=r, col=1)
+    fig.update_xaxes(type="category", nticks=6 if mobil else 12, rangeslider_visible=False)  # tatil boşluklarını gizler
+    fig.update_layout(height=(420 if mobil else 560) + 110 * (satir - 1), template="plotly_dark",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0), margin=dict(l=5, r=5, t=30, b=5),
+                      dragmode="pan" if mobil else "zoom")
+    return fig
 
-        if alt_panel in ["RSI + MACD", "Sadece RSI"]:
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['RSI_14'], name='RSI', line=dict(color='#c084fc', width=1.6)), row=2, col=1)
-            fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-        if alt_panel == "Sadece MACD":
-            macd_renk = ['green' if v >= 0 else 'red' for v in df_plot['MACD_Hist'].fillna(0)]
-            fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], name='Hist', marker_color=macd_renk), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], name='MACD', line=dict(color='#38bdf8', width=1.3)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], name='Sinyal', line=dict(color='orange', width=1.3)), row=2, col=1)
-        elif alt_panel == "RSI + MACD":
-            macd_renk = ['green' if v >= 0 else 'red' for v in df_plot['MACD_Hist'].fillna(0)]
-            fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], name='Hist', marker_color=macd_renk), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], name='MACD', line=dict(color='#38bdf8', width=1.2)), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], name='Sinyal', line=dict(color='orange', width=1.2)), row=3, col=1)
+with sek[1]:
+    c = st.columns(2 if mobil else 4)
+    secim = c[0].selectbox("Varlık", list(ETIKET), index=list(ETIKET).index("THYAO"))
+    elle = c[1].text_input("veya kod yazın", "", placeholder="ör. TUPRS, ALTIN, BTC, AAPL")
+    zaman = c[2 % len(c)].selectbox("Zaman", list(ZAMAN))
+    usd = c[3 % len(c)].toggle("Dolar bazında", value=False, help="TL fiyatlı varlıkları dolar kuruna böler")
+    p, i, bar = ZAMAN[zaman]
+    bar = int(bar * 0.6) if mobil else bar
 
-        # Lejantı sağa değil üste yatay yerleştirerek mobilde grafiğin daralmasını engelle
-        fig.update_layout(
-            height=560 if mobil_mi else 800,
-            template="plotly_dark",
-            xaxis_rangeslider_visible=False,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            margin=dict(l=5, r=5, t=40, b=10)
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    adaylar = core.sembol_adaylari(elle, BIST30 + GENIS) if elle.strip() else [ETIKET[secim]]
+    sembol, df = adaylar[0], pd.DataFrame()
+    for a in adaylar:
+        d = veri((a,), p, i).get(a, pd.DataFrame())
+        if len(d):
+            sembol, df = a, d
+            break
+    tl_bazli = sembol.endswith(".IS") or sembol in TL_BAZLI
+    if len(df) and usd and tl_bazli:
+        k = veri(("USDTRY=X",), p, i)["USDTRY=X"]
+        if len(k):
+            kur = k["Close"].reindex(df.index, method="ffill").bfill()
+            df = df.assign(**{kol: df[kol] / kur for kol in ["Open", "High", "Low", "Close"]})
 
-with tab2:
-    st.subheader("BIST 30 / 100 Teknik Tarayıcı")
-    evren = st.radio("Tarama Kapsamı", ["BIST 30 (Hızlı)", "BIST 100 (Tam Liste)"], horizontal=True)
-    filtreler = st.multiselect(
-        "Akıllı Sinyal Filtresi (Boş bırakılırsa tümü listelenir)",
-        ["Supertrend AL", "EMA5 > EMA21", "SMA200 Üstü", "Hacim Patlaması (>1.5x)", "Aşırı Satım (RSI<35)"]
-    )
-    baslat = st.button("Taramayı Başlat", type="primary", use_container_width=True)
-    hedef_liste = BIST_30 if "BIST 30" in evren else BIST_100
+    if len(df) < 30:
+        st.error(f"“{core.kisa(sembol)}” için yeterli veri alınamadı. Kodu kontrol edin veya biraz sonra yeniden deneyin.")
+    else:
+        g = core.gostergeler(df)
+        s = g.iloc[-1]
+        puan, etiket = core.durum(s)
+        oran, tahmini = core.hacim_orani(g, bist=sembol.endswith(".IS") and i == "1d")
+        ond = 4 if s["Close"] < 100 and not sembol.endswith(".IS") else 2
+        st.markdown(f"### {core.kisa(sembol)}" + (" · $" if usd and tl_bazli else ""))
+        izgara([
+            ("Fiyat", tr(s["Close"], ond), yuzde(core.getiri(g["Close"], 1))),
+            ("Teknik durum", etiket, f"{puan}/6 kontrol olumlu"),
+            ("RSI (14)", tr(s["RSI"], 0), None),
+            ("Supertrend", "🟢 AL" if s["ST_Yon"] == 1 else "🔴 SAT", None),
+        ] + ([("Hacim", tr(oran, 2) + "x" + (" (tahmini)" if tahmini else ""), None)] if pd.notna(oran) else []))
+        destek, direnc, _ = core.destek_direnc(g)
+        atr = float(s["ATR"]) if pd.notna(s["ATR"]) else 0.0
+        st.info(f"**Destek:** {tr(destek, ond) if destek else '–'} · **Direnç:** {tr(direnc, ond) if direnc else 'yok (zirve bölgesi)'} · "
+                f"**2×ATR alt bant:** {tr(s['Close'] - 2 * atr, ond)} · **3×ATR üst bant:** {tr(s['Close'] + 3 * atr, ond)}")
+        for sn in core.sinyaller(g):
+            st.markdown(("🟢 " if sn["yon"] > 0 else "🔴 " if sn["yon"] < 0 else "🔊 ") + f"**Yeni:** {sn['metin']}")
 
-    if baslat:
-        sonuclar = []
-        ilerleme = st.progress(0)
-        for idx, hisse in enumerate(hedef_liste):
-            try:
-                d = veri_cek(hisse, "1y", "1d")
-                if not d.empty and len(d) > 30:
-                    d = teknik_hesapla(d)
-                    s = d.iloc[-1]
-                    sinyaller = []
-                    if s['ST_Dir']:
-                        sinyaller.append("Supertrend AL")
-                    if s['EMA_5'] > s['EMA_21']:
-                        sinyaller.append("EMA5 > EMA21")
-                    if pd.notna(s['SMA_200']) and s['Close'] > s['SMA_200']:
-                        sinyaller.append("SMA200 Üstü")
-                    if s['Vol_Ratio'] >= 1.5:
-                        sinyaller.append("Hacim Patlaması (>1.5x)")
-                    if s['RSI_14'] < 35:
-                        sinyaller.append("Aşırı Satım (RSI<35)")
+        with st.expander("Grafik ayarları", expanded=not mobil):
+            katman = st.multiselect("Katmanlar", ["EMA 5", "EMA 21", "EMA 50", "SMA 200", "SMA 600", "Supertrend",
+                                                  "Bollinger", "Destek/Direnç"],
+                                    default=["EMA 21", "Supertrend", "Destek/Direnç"] if mobil else
+                                    ["EMA 21", "EMA 50", "SMA 200", "Supertrend", "Destek/Direnç"])
+            alt = st.multiselect("Alt paneller", ["RSI", "MACD", "Hacim"], default=["RSI"] if mobil else ["RSI", "Hacim"])
+        st.plotly_chart(grafik_ciz(g.tail(bar), katman, alt, destek, direnc, i == "1h"), width="stretch",
+                        config={"displayModeBar": not mobil, "scrollZoom": True})
+        st.caption("Teknik durum 6 basit kontrole dayanır (fiyat>21G, 21G>50G, fiyat>200G, Supertrend, RSI 45–75, MACD). "
+                   "Bilgi amaçlıdır, yatırım tavsiyesi değildir.")
 
-                    if filtreler and not all(f in sinyaller for f in filtreler):
-                        pass
-                    else:
-                        sonuclar.append({
-                            "Hisse": hisse.replace(".IS", ""),
-                            "Fiyat": round(float(s['Close']), 2),
-                            "RSI": round(float(s['RSI_14']), 1),
-                            "Hacim": round(float(s['Vol_Ratio']), 2),
-                            "Trend": "🟢 AL" if s['ST_Dir'] else "🔴 SAT",
-                            "Sinyaller": " | ".join(sinyaller) if sinyaller else "Nötr"
-                        })
-            except Exception:
-                pass
-            ilerleme.progress((idx + 1) / len(hedef_liste))
-
-        if sonuclar:
-            df_sonuc = pd.DataFrame(sonuclar).sort_values(by="Hacim", ascending=False)
-            st.success(f"Toplam **{len(df_sonuc)}** hisse bulundu.")
-            st.dataframe(df_sonuc, use_container_width=True, hide_index=True)
+# ================================================================ TARAYICI
+with sek[2]:
+    evren = st.radio("Kapsam", [f"BIST 30 ({CFG['bist30_donem']})", "Geniş liste (BIST 30 + yaklaşık 70 hisse)"],
+                     horizontal=not mobil)
+    if evren.startswith("BIST 30"):
+        tdf = b30
+    else:
+        if st.button("Geniş listeyi tara", type="primary") or st.session_state.get("genis"):
+            st.session_state["genis"] = True
+            with st.spinner("Yaklaşık 100 hisse taranıyor…"):
+                tdf = bist_tarama(tuple(BIST30 + GENIS))
         else:
-            st.warning("Kriterlere uyan hisse bulunamadı.")
+            tdf = None
+            st.caption("Geniş tarama 10–20 saniye sürebilir; sonuç 10 dakika önbellekte kalır.")
+    if tdf is not None and len(tdf):
+        FILTRE = {
+            "Yeni sinyal var": lambda d: d["Yeni Sinyal"] != "–",
+            "Yukarı kırılım (↑)": lambda d: d["Yeni Sinyal"].str.contains("↑"),
+            "Teknik güçlü 🟢": lambda d: d["_puan"] >= 5,
+            "Supertrend AL": lambda d: d["_st"] == 1,
+            "200G üstünde": lambda d: d["Üstünde"].str.contains(">200G"),
+            "Hacim ≥ 1,5x": lambda d: d["Hacim x"] >= 1.5,
+            "RSI < 35": lambda d: d["RSI"] < 35,
+            "Zirveye %5'ten yakın": lambda d: d["Zirveye %"] >= -5,
+        }
+        f1, f2 = st.columns([3, 1])
+        secili = f1.multiselect("Filtre (hepsi birden sağlanmalı)", list(FILTRE))
+        sirala = f2.selectbox("Sırala", ["Hacim x", "Gün %", "RSI", "Zirveye %"])
+        sonuc = tdf
+        for f in secili:
+            sonuc = sonuc[FILTRE[f](sonuc).fillna(False)]
+        sonuc = sonuc.sort_values(sirala, ascending=False)
+        st.caption(f"{len(sonuc)} / {len(tdf)} hisse" + (" · seans sürerken hacim, gün sonuna yansıtılmış tahmindir"
+                                                          if tdf["_hacim_tahmini"].any() else ""))
+        tablo(sonuc, height=420 if mobil else 600)
+        st.download_button("CSV indir", sonuc.drop(columns=[c for c in sonuc if c.startswith("_")]).to_csv(index=False).encode("utf-8-sig"),
+                           "tarama.csv", "text/csv")
+    elif tdf is not None:
+        st.warning("Tarama verisi alınamadı.")
 
-with tab3:
-    st.subheader("AKD & Para Giriş-Çıkış Çözümleyici")
-    yuklenen_dosya = st.file_uploader("İdeal / Matriks Excel veya CSV Dosyası", type=["csv", "xlsx", "xls"])
-    ham_veri = st.text_area("Veya Tabloyu Doğrudan Yapıştırın (Kurum + Net Lot):", height=120)
+# ================================================================ KARŞILAŞTIR
+with sek[3]:
+    st.markdown("#### Hangisi daha çok kazandırdı?")
+    K = {"BIST 100": "XU100.IS", "BIST 30": "XU030.IS", "Dolar": "USDTRY=X", "Euro": "EURTRY=X",
+         "Gram Altın": "GRAMALTIN", "Gram Gümüş": "GRAMGUMUS", "Bitcoin (TL)": "BTCTRY"}
+    K.update({k: k + ".IS" for k in BIST30})
+    sec = st.multiselect("Varlıklar (TL cinsinden)", list(K), default=["BIST 100", "Dolar", "Gram Altın", "Bitcoin (TL)"])
+    d1, d2 = st.columns([3, 1])
+    sure = d1.radio("Dönem", ["1 Ay", "3 Ay", "6 Ay", "Yılbaşı", "1 Yıl", "3 Yıl"], index=4, horizontal=True)
+    dolar = d2.toggle("Dolar bazında", key="k_usd", help="Hepsini dolar kuruna böler: dolar karşısında gerçek getiri")
+    if sec:
+        kv = veri(tuple(sorted({K[x] for x in sec} | {"USDTRY=X"})), "3y", "1d")
+        seri = pd.DataFrame({x: kv[K[x]]["Close"] for x in sec if len(kv[K[x]])}).sort_index().ffill()
+        if dolar and len(kv["USDTRY=X"]):
+            seri = seri.div(kv["USDTRY=X"]["Close"].reindex(seri.index, method="ffill").bfill(), axis=0)
+        if len(seri):
+            bugun = seri.index[-1]
+            bas = {"1 Ay": bugun - pd.DateOffset(months=1), "3 Ay": bugun - pd.DateOffset(months=3),
+                   "6 Ay": bugun - pd.DateOffset(months=6), "Yılbaşı": pd.Timestamp(bugun.year, 1, 1) - pd.Timedelta(days=1),
+                   "1 Yıl": bugun - pd.DateOffset(years=1), "3 Yıl": seri.index[0]}[sure]
+            seri = seri[seri.index >= bas].dropna()
+        if len(seri) > 1:
+            norm = seri / seri.iloc[0] * 100
+            fig = go.Figure([go.Scatter(x=norm.index, y=norm[c], name=c) for c in norm])
+            fig.add_hline(y=100, line_dash="dot", line_color="gray")
+            fig.update_layout(height=380 if mobil else 480, template="plotly_dark", margin=dict(l=5, r=5, t=30, b=5),
+                              legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0), yaxis_title="Başlangıç = 100")
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+            get = (norm.iloc[-1] - 100).sort_values(ascending=False)
+            izgara([(ad, yuzde(v, 1), None) for ad, v in get.items()])
+            st.caption(f"{seri.index[0]:%d.%m.%Y} → {seri.index[-1]:%d.%m.%Y} · "
+                       + ("dolar" if dolar else "TL") + " cinsinden toplam getiri. Temettü, faiz ve enflasyon dahil değildir.")
+        else:
+            st.warning("Bu seçim için yeterli veri yok.")
 
-    if st.button("AKD Pastasını Çözümle", type="primary", use_container_width=True):
-        kurum_verisi = []
-        if yuklenen_dosya is not None:
-            try:
-                df_akd = pd.read_csv(yuklenen_dosya) if yuklenen_dosya.name.endswith(".csv") else pd.read_excel(yuklenen_dosya)
-                st.dataframe(df_akd.head(15), use_container_width=True)
-                num_cols = df_akd.select_dtypes(include=[np.number]).columns
-                str_cols = df_akd.select_dtypes(exclude=[np.number]).columns
-                if len(num_cols) > 0 and len(str_cols) > 0:
-                    for _, r in df_akd.iterrows():
-                        kurum_verisi.append((str(r[str_cols[0]]), float(r[num_cols[-1]])))
-            except Exception as e:
-                st.error(f"Dosya okunamadı: {e}")
-        elif ham_veri.strip():
-            for line in ham_veri.strip().split("\n"):
-                nums = re.findall(r"-?\d[\d\.,]*", line)
-                name = re.sub(r"[-?\d\.,]+", "", line).strip()
-                if name and nums:
-                    try:
-                        val = float(nums[-1].replace(".", "").replace(",", "."))
-                        kurum_verisi.append((name, val))
-                    except Exception:
-                        pass
+# ================================================================ TEMEL
+with sek[4]:
+    st.markdown("#### BIST 30 çarpanları (PD/DD, F/K)")
+    st.caption("Kaynak Yahoo Finance; BIST şirketlerinde eksik veya gecikmiş olabilir. Bankalar ile sanayi şirketlerinin "
+               "çarpanları doğrudan kıyaslanmaz. Karar öncesi KAP'taki bilançodan doğrulayın.")
+    if st.button("Çarpanları getir", type="primary") or st.session_state.get("temel"):
+        st.session_state["temel"] = True
+        cubuk, satirlar = st.progress(0.0), []
+        for n, kod in enumerate(BIST30):
+            r = temel(kod)
+            if r:
+                satirlar.append(r)
+            cubuk.progress((n + 1) / len(BIST30))
+        cubuk.empty()
+        if satirlar:
+            st.dataframe(pd.DataFrame(satirlar).sort_values("PD/DD").round(2), width="stretch", hide_index=True)
+        else:
+            st.warning("Temel veri alınamadı (Yahoo bu ortamdan yanıt vermiyor olabilir).")
 
-        if kurum_verisi:
-            df_k = pd.DataFrame(kurum_verisi, columns=["Kurum", "Net Lot"])
-            alicilar = df_k[df_k["Net Lot"] > 0].sort_values(by="Net Lot", ascending=False)
-            saticilar = df_k[df_k["Net Lot"] < 0].sort_values(by="Net Lot", ascending=True)
+# ================================================================ AKD
+with sek[5]:
+    st.markdown("#### Aracı kurum dağılımı (AKD) çözümleyici")
+    st.caption("AKD verisi lisanslıdır; Matriks, İdeal veya aracı kurum ekranınızdan dışa aktardığınız dosyayı yükleyin "
+               "ya da tabloyu yapıştırın. Başlık satırını da kopyalarsanız sütunlar daha doğru tanınır.")
+    dosya = st.file_uploader("Excel / CSV", type=["csv", "xlsx", "xls", "txt"])
+    ham = st.text_area("veya tabloyu yapıştırın", height=130,
+                       placeholder="Kurum | Alış | Satış | Net\nBank of America | 1.250.000 | 450.000 | 800.000\nİş Yatırım | 600.000 | 900.000 | -300.000")
+    if st.button("Çözümle", type="primary", width="stretch"):
+        satirlar = []
+        try:
+            if dosya is not None:
+                if dosya.name.lower().endswith((".xlsx", ".xls")):
+                    satirlar = pd.read_excel(dosya, header=None, dtype=str).fillna("").values.tolist()
+                else:
+                    metin = metin_coz(dosya.getvalue())
+                    if not any(a in metin for a in ";|\t"):
+                        satirlar = pd.read_csv(io.StringIO(metin), header=None, dtype=str).fillna("").values.tolist()
+                    else:
+                        satirlar = core.metinden_satirlar(metin)
+            elif ham.strip():
+                satirlar = core.metinden_satirlar(ham)
+        except Exception as e:
+            st.error(f"Dosya okunamadı: {e}")
+        st.session_state["akd"] = core.akd_coz(satirlar) if satirlar else None
+    if st.session_state.get("akd"):
+        adf, aciklama = st.session_state["akd"]
+        if adf.empty:
+            st.warning(aciklama)
+        else:
+            o = core.akd_ozet(adf)
+            st.caption("Sütun yorumu: " + aciklama)
+            izgara([("İlk 5 alıcı", tr(o["ilk5_al"], 0) + " lot", None), ("İlk 5 satıcı", tr(o["ilk5_sat"], 0) + " lot", None),
+                    ("İlk 5 net", tr(o["net"], 0) + " lot", "▲ Alıcılar baskın" if o["net"] > 0 else "▼ Satıcılar baskın"),
+                    ("Alıcı yoğunlaşması", "%" + tr(o["yogunlasma"], 0), None)])
+            if o["bofa"] is not None:
+                st.warning(f"**BofA net:** {tr(o['bofa'], 0)} lot ({'alıcı' if o['bofa'] > 0 else 'satıcı'})")
+            ilk = pd.concat([o["alicilar"].head(5), o["saticilar"].head(5)]).sort_values("Net Lot")
+            fig = go.Figure(go.Bar(x=ilk["Net Lot"], y=ilk["Kurum"], orientation="h",
+                                   marker_color=["#26a69a" if v > 0 else "#ef5350" for v in ilk["Net Lot"]]))
+            fig.update_layout(height=380, template="plotly_dark", margin=dict(l=5, r=5, t=10, b=5))
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+            with st.expander("Tüm kurumlar"):
+                st.dataframe(adf.sort_values("Net Lot", ascending=False), width="stretch", hide_index=True)
 
-            ilk5_alis = alicilar.head(5)["Net Lot"].sum()
-            ilk5_satis = abs(saticilar.head(5)["Net Lot"].sum())
-            net_fark = ilk5_alis - ilk5_satis
+# ================================================================ HABER
+with sek[6]:
+    def haber_yaz(liste):
+        simdi = datetime.now().timestamp()
+        for h in liste:
+            sa = (simdi - h["ts"]) / 3600 if h["ts"] else None
+            ne = "" if sa is None else (f"{int(sa * 60)} dk önce" if sa < 1 else f"{int(sa)} sa önce" if sa < 24 else f"{int(sa / 24)} gün önce")
+            st.markdown(f"[{h['baslik']}]({h['link']})  \n<small>{h['kaynak']} · {ne}</small>", unsafe_allow_html=True)
 
-            k1, k2 = st.columns(2)
-            k1.metric("İlk 5 Alıcı", f"{ilk5_alis:,.0f} Lot")
-            k2.metric("İlk 5 Satıcı", f"{ilk5_satis:,.0f} Lot")
-            st.metric("İlk 5 Net Para Giriş/Çıkış", f"{net_fark:+,.0f} Lot", "Toplama" if net_fark > 0 else "Dağıtım")
-
-            bofa = df_k[df_k["Kurum"].str.upper().str.contains("BOFA|BANK OF AMERICA")]
-            if not bofa.empty:
-                st.warning(f"**BofA Net Pozisyonu:** {bofa['Net Lot'].sum():+,.0f} Lot")
-
-            if not alicilar.empty:
-                fig_a = go.Figure(go.Pie(labels=alicilar.head(5)["Kurum"], values=alicilar.head(5)["Net Lot"], hole=0.4, title="İlk 5 Alıcı"))
-                fig_a.update_layout(height=320, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
-                st.plotly_chart(fig_a, use_container_width=True)
-            if not saticilar.empty:
-                fig_s = go.Figure(go.Pie(labels=saticilar.head(5)["Kurum"], values=saticilar.head(5)["Net Lot"].abs(), hole=0.4, title="İlk 5 Satıcı"))
-                fig_s.update_layout(height=320, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
-                st.plotly_chart(fig_s, use_container_width=True)
-
-with tab4:
-    st.subheader(f"Temel Çarpanlar & {sembol} Haberler")
-    try:
-        info = yf.Ticker(sembol).info
-        c1, c2 = st.columns(2)
-        c1.metric("F/K Oranı", f"{info.get('trailingPE', 'Veri Yok')}")
-        c2.metric("PD/DD Oranı", f"{info.get('priceToBook', 'Veri Yok')}")
-    except Exception:
-        st.write("Temel veri çekilemedi.")
-
+    konu = st.selectbox("Konu", list(ETIKET), index=list(ETIKET).index(secim), key="h_konu")
+    hs = ETIKET[konu]
+    sorgu = (konu + " hisse") if hs.endswith(".IS") and not hs.startswith("XU") else konu.split("(")[0].strip()
+    st.markdown(f"#### {konu} haberleri (son 3 gün)")
+    ozel = core.haber_birlestir([haber(core.google_haber_url(sorgu))], 12)
+    if ozel:
+        haber_yaz(ozel)
+    else:
+        st.caption("Güncel haber bulunamadı.")
+    if hs.endswith(".IS"):
+        st.caption("Resmî şirket bildirimleri için: [KAP](https://www.kap.org.tr) — burada KAP haberleri yalnızca "
+                   "haber sitelerine yansıdığı kadarıyla görünür.")
     st.divider()
-    st.write(f"**🔍 {sembol.replace('.IS', '')} Özel Haberler (Son 3 Gün / KAP Dahil)**")
-    eslesen = next((w["query"] for w in WATCHLIST if w["symbol"] == sembol), f"{sembol.replace('.IS', '')} hisse")
-    gn_url = f"https://news.google.com/rss/search?q={quote(eslesen + ' when:3d')}&hl=tr&gl=TR&ceid=TR:tr"
-    for h in haber_cek(gn_url):
-        st.markdown(f"- [{h['title']}]({h['link']})")
+    st.markdown("#### Genel ekonomi")
+    genel = core.haber_birlestir([haber(k["url"], k["ad"]) for k in CFG["haber_kaynaklari"]], 10)
+    if genel:
+        haber_yaz(genel)
+    else:
+        st.caption("Haber kaynaklarına ulaşılamadı.")
 
-    st.divider()
-    st.write("**🌐 Genel Piyasa Başlıkları (Bloomberg HT & AA)**")
-    for h in (haber_cek("https://www.bloomberght.com/rss")[:4] + haber_cek("https://www.aa.com.tr/tr/rss/default?cat=ekonomi")[:4]):
-        st.markdown(f"- [{h['title']}]({h['link']})")
+# ================================================================ ALARM
+with sek[7]:
+    st.markdown("#### 🔔 Telegram uyarıları")
+    st.markdown("Uyarıları bu sayfa değil, GitHub'da zamanlanmış **alarm botu** gönderir; sayfa kapalıyken de çalışır. "
+                "Kurulum adımları `README.md` dosyasında.")
+    a = CFG["alarm"]
+    st.markdown(
+        f"- **Piyasa:** döviz, altın, kripto ve endekslerde günlük eşik aşılınca (ör. Dolar %{tr(1.0, 1)}, Bitcoin %{tr(4.0, 0)})\n"
+        f"- **BIST 30 hisse:** günlük ±%{tr(a['hisse_gunluk_esik'], 0)} hareket; 21/50/200/600 günlük ortalama kırılımı; "
+        f"Supertrend dönüşü; RSI 30/70; 52 hafta zirve/dip; hacim ≥ {tr(a['hacim_carpani'], 1)}x\n"
+        "- **Fiyat alarmı:** `config.json` içindeki `fiyat_alarmlari` listesi\n"
+        "- **Sabah bülteni** 09:30 · **Kapanış özeti** 18:40 (hafta içi)")
+    fa = CFG.get("fiyat_alarmlari", [])
+    if fa:
+        st.dataframe(pd.DataFrame(fa), width="stretch", hide_index=True)
+    else:
+        st.caption("Henüz fiyat alarmı tanımlı değil. Örnek: "
+                   '`{"sembol": "THYAO.IS", "ust": 350, "alt": 280, "not": "hedef"}`')
+    st.markdown("##### Şu an tetiklenen kurallar")
+    if dolu:
+        simdi = datetime.now(core.IST)
+        ol = alarm_bot.olaylar(CFG, piyasa, b30 if len(b30) else None, simdi)
+        if ol:
+            for o in ol:
+                st.markdown(f"- {o['metin']}")
+        else:
+            st.caption("Şu an eşiği aşan bir hareket yok.")
