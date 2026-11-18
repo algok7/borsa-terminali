@@ -1,0 +1,65 @@
+name: Alarm Botu
+
+# Saatler UTC'dir; Türkiye saati = UTC + 3.
+on:
+  schedule:
+    - cron: "30 6 * * 1-5"       # 09:30 sabah bülteni
+    - cron: "5,35 7-14 * * 1-5"  # 10:05-17:35 seans içi tarama (30 dk)
+    - cron: "5 15 * * 1-5"       # 18:05 son tarama
+    - cron: "40 15 * * 1-5"      # 18:40 kapanış özeti
+    - cron: "0 5,11,17,21 * * *" # 08, 14, 20, 00: döviz / altın / kripto taraması (hafta sonu dahil)
+  workflow_dispatch:
+    inputs:
+      mod:
+        description: "Çalışma modu"
+        type: choice
+        default: tarama
+        options: [tarama, sabah, ozet]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alarm-botu
+  cancel-in-progress: false
+
+jobs:
+  calis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-bot.txt
+      - run: pip install -r requirements-bot.txt
+      - name: Önceki uyarı durumunu al (aynı uyarıyı tekrar göndermemek için)
+        uses: actions/cache/restore@v4
+        with:
+          path: .alarm_state.json
+          key: alarm-durum-${{ github.run_id }}
+          restore-keys: alarm-durum-
+      - name: Modu belirle
+        id: mod
+        env:
+          ZAMAN: ${{ github.event.schedule }}
+          ELLE: ${{ inputs.mod }}
+        run: |
+          case "$ZAMAN" in
+            "30 6 * * 1-5")  echo "mod=sabah" ;;
+            "40 15 * * 1-5") echo "mod=ozet" ;;
+            *)               echo "mod=${ELLE:-tarama}" ;;
+          esac >> "$GITHUB_OUTPUT"
+      - name: Botu çalıştır
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+        run: python alarm_bot.py "${{ steps.mod.outputs.mod }}"
+      - name: Uyarı durumunu sakla
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .alarm_state.json
+          key: alarm-durum-${{ github.run_id }}
